@@ -53,16 +53,15 @@ export KVPN_USER=your_id   # add to ~/.zshrc or ~/.bashrc
 
 ![A full kvpn session: ID/password/realm prompts, SMS one-time code, Keychain storage offer, and OpenConnect bringing up the tunnel](docs/screenshot.png)
 
-With stored credentials, later runs skip straight to the code prompt:
+With stored credentials, later runs skip straight to code authentication.
+On macOS, kvpn waits for the SMS code automatically:
 
 ```
 $ ./kvpn
 === KAIST VPN (kvpn) ===
 Using stored credentials for your_id (KAIST Members). Run `kvpn --forget` to remove.
-Send code via:
-  1) SMS (default)
-  2) Email
-Choice [1]:
+Code sent via SMS. It may take up to a minute to arrive.
+Waiting up to 60 seconds for a KVPN SMS in Messages...
 ```
 
 ## Why
@@ -92,10 +91,61 @@ Developed and tested on macOS. It should work on Linux with OpenConnect's defaul
 Run `./kvpn` and follow the prompts. To disconnect, press **Ctrl-C** in the
 terminal running it — OpenConnect tears down the tunnel and restores your routes.
 
+### macOS: automatic SMS code entry
+
+```sh
+kvpn
+```
+
+On macOS, kvpn selects SMS delivery automatically, waits up to 60 seconds for a
+new KVPN text in Mac Messages, and submits its code. If Messages access is not
+permitted, kvpn explains how to grant access and automatically falls back to
+manual code entry without requiring another option or restart. It also falls
+back to manual entry if no code is found within 60 seconds. Linux keeps the
+existing SMS/email selection and manual code entry.
+
+To enter a code manually or use email authentication, disable automatic entry.
+This mode never accesses Messages:
+
+```sh
+kvpn --no-auto-sms
+```
+
+You can also explicitly enable automatic entry with `--auto-sms`.
+
+Before using it:
+
+1. Make sure your iPhone's KVPN texts appear in Mac Messages. Use the same Apple
+   Account and set up [Text Message Forwarding](https://support.apple.com/102545).
+2. In **System Settings → Privacy & Security → Full Disk Access**, allow the app
+   running kvpn (for example Terminal, iTerm2, or Emacs). You may need to quit and
+   reopen that app after changing permissions.
+
+Press `Ctrl-C` to cancel while waiting.
+
+### macOS: sudo authentication with Touch ID (optional)
+
+On a Mac with Touch ID, sudo can use fingerprint authentication through its PAM
+configuration. kvpn uses the system sudo authentication and does not store your
+fingerprint or Mac password. This setting affects other sudo commands too.
+
+On recent macOS versions, first check that `/etc/pam.d/sudo` includes
+`sudo_local`. Follow the system's `/etc/pam.d/sudo_local.template` instructions
+to configure `/etc/pam.d/sudo_local` with this entry, preserving existing local
+settings. There is no need to edit `/etc/pam.d/sudo` itself:
+
+```text
+auth       sufficient     pam_tid.so
+```
+
+Administrator access is required. Run `sudo -k` followed by `sudo -v` to test.
+Touch ID availability depends on the execution environment and password fallback
+may still be necessary. kvpn does not change this system setting automatically.
+
 ### Stored credentials
 
 After a successful login, kvpn offers to store your credentials so future runs
-jump straight to the "Send code via" prompt. The password goes into the
+jump straight to code authentication. The password goes into the
 **macOS Keychain** (service `kvpn`); your ID and realm go into
 `~/.config/kvpn/config.json` (user-only, `0600`). On systems without a
 Keychain, the password is kept in that same `0600` file instead (kvpn warns
@@ -113,25 +163,6 @@ flow changes and something breaks):
 ```sh
 KVPN_DEBUG=1 ./kvpn
 ```
-
-## How it works
-
-The login is a chain across two hosts — the Ivanti gateway (`kvpn.kaist.ac.kr`)
-and the AirCUVE portal (`kvpnportal.kaist.ac.kr:8443`):
-
-1. `GET kvpn.kaist.ac.kr/` — obtain the Ivanti sign-in session.
-2. `GET portal /view/redirectVPN` — mint a portal session and correlation code.
-3. `GET portal /view/onepassCheck` → `/vpnInit` — set the OTP context.
-4. `GET portal /oauth/authorize` — register the OAuth request as Spring Security's
-   "saved request" so the post-OTP redirect returns to the OAuth flow.
-5. `POST portal /api/portal` (`cmd=AuthPortal.twoAuthSend`) — send the SMS/email code.
-6. `POST portal /j_spring_security_check.do` — verify the code; Spring redirects
-   through `/oauth/authorize` → `/vpn/<client_id>?code=…`.
-7. That page exposes a `message` token, which becomes Ivanti's `password#2`.
-8. `POST login.cgi` with username, password, realm, and `password#2` → a `DSID`
-   session cookie.
-9. `sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr` — the DSID
-   is passed on stdin so it never appears in the process list.
 
 ## Notes & troubleshooting
 

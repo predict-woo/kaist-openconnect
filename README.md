@@ -49,16 +49,15 @@ export KVPN_USER=your_id   # ~/.zshrc 또는 ~/.bashrc 에 추가
 
 ![kvpn 전체 세션: ID/비밀번호/realm 입력, SMS 일회용 코드, 키체인 저장 여부 확인, OpenConnect 터널 연결](docs/screenshot.png)
 
-자격 증명을 저장해 두면 이후 실행에서는 곧바로 코드 입력 단계로 넘어갑니다:
+자격 증명을 저장해 두면 이후 실행에서는 곧바로 코드 인증 단계로 넘어갑니다.
+macOS에서는 다음과 같이 SMS 코드를 자동으로 기다립니다:
 
 ```
 $ ./kvpn
 === KAIST VPN (kvpn) ===
 Using stored credentials for your_id (KAIST Members). Run `kvpn --forget` to remove.
-Send code via:
-  1) SMS (default)
-  2) Email
-Choice [1]:
+Code sent via SMS. It may take up to a minute to arrive.
+Waiting up to 60 seconds for a KVPN SMS in Messages...
 ```
 
 ## 왜 만들었나
@@ -89,10 +88,60 @@ macOS에서 개발·테스트했습니다. Linux에서도 OpenConnect 기본 `vp
 터미널에서 **Ctrl-C** 를 누르세요 — OpenConnect가 터널을 정리하고 라우팅을
 복원합니다.
 
+### macOS: SMS 코드 자동 입력
+
+```sh
+kvpn
+```
+
+macOS에서는 기본으로 SMS 전송을 선택한 뒤, Mac의 메시지 앱에 도착한 새 KVPN
+인증 문자를 최대 60초 동안 자동으로 기다려 코드를 입력합니다. 메시지에 접근할
+권한이 없으면 권한 설정 방법을 안내하고, 별도 옵션 없이 수동 코드 입력으로
+자동 전환합니다. 60초 안에 코드를 찾지 못한 경우에도 수동 입력으로 전환합니다.
+
+수동으로 입력하거나 이메일 인증을 사용하려면 다음과 같이 실행하세요. 이때는
+메시지 데이터베이스에 접근하지 않습니다.
+
+```sh
+kvpn --no-auto-sms
+```
+
+`--auto-sms`로 자동 입력을 명시할 수도 있습니다.
+
+준비 사항:
+
+1. iPhone의 인증 SMS가 Mac 메시지 앱에도 표시되어야 합니다. 같은 Apple 계정을
+   사용하고 [문자 메시지 전달](https://support.apple.com/102545)을 설정하세요.
+2. **시스템 설정 → 개인정보 보호 및 보안 → 전체 디스크 접근 권한**에서 kvpn을
+   실행하는 앱(예: Terminal, iTerm2, Emacs)의 접근을 허용하세요. 권한 변경 후
+   해당 앱을 완전히 종료하고 다시 실행해야 할 수 있습니다.
+
+Linux에서는 기존 SMS/이메일 선택과 수동 코드 입력을 사용합니다.
+기다리는 동안 `Ctrl-C`를 누르면 연결 시도를 취소합니다.
+
+### macOS: sudo Touch ID 인증 (선택)
+
+Touch ID를 지원하는 Mac은 sudo의 PAM 설정으로 지문 인증을 사용할 수 있습니다.
+`kvpn`은 시스템 sudo 인증을 그대로 사용하며 지문이나 Mac 비밀번호를 저장하지
+않습니다. 이 설정은 kvpn 외의 sudo 명령에도 적용됩니다.
+
+최근 macOS에서는 `/etc/pam.d/sudo`에 `sudo_local` 포함 설정이 있는지 확인한 뒤,
+시스템의 `/etc/pam.d/sudo_local.template` 안내에 따라
+`/etc/pam.d/sudo_local`에 다음 항목을 설정할 수 있습니다. 기존 설정을 유지하고,
+`/etc/pam.d/sudo` 자체는 수정하지 않아도 됩니다.
+
+```text
+auth       sufficient     pam_tid.so
+```
+
+관리자 권한이 필요하며, `sudo -k` 후 `sudo -v`로 인증을 확인할 수 있습니다.
+Touch ID 사용 가능 여부는 실행 환경에 따라 달라지며 비밀번호 인증이 필요할
+수도 있습니다. kvpn은 이 시스템 설정을 자동으로 변경하지 않습니다.
+
 ### 자격 증명 저장
 
 로그인에 성공하면 kvpn이 자격 증명 저장을 제안하며, 저장해 두면 이후 실행은
-곧바로 "Send code via" 단계로 넘어갑니다. 비밀번호는 **macOS 키체인**(서비스명
+곧바로 코드 인증 단계로 넘어갑니다. 비밀번호는 **macOS 키체인**(서비스명
 `kvpn`)에, ID와 realm은 `~/.config/kvpn/config.json`(사용자 전용, `0600`)에
 저장됩니다. 키체인이 없는 시스템에서는 비밀번호도 같은 `0600` 파일에 저장됩니다
 (저장 전에 경고를 띄웁니다). 어느 경우든 일회용 코드는 매 접속마다 새로
@@ -110,26 +159,6 @@ macOS에서 개발·테스트했습니다. Linux에서도 OpenConnect 기본 `vp
 ```sh
 KVPN_DEBUG=1 ./kvpn
 ```
-
-## 동작 원리
-
-로그인은 두 호스트 — Ivanti 게이트웨이(`kvpn.kaist.ac.kr`)와 AirCUVE
-포털(`kvpnportal.kaist.ac.kr:8443`) — 를 오가는 체인입니다:
-
-1. `GET kvpn.kaist.ac.kr/` — Ivanti 로그인 세션을 얻습니다.
-2. `GET portal /view/redirectVPN` — 포털 세션과 correlation code를 발급받습니다.
-3. `GET portal /view/onepassCheck` → `/vpnInit` — OTP 컨텍스트를 설정합니다.
-4. `GET portal /oauth/authorize` — OAuth 요청을 Spring Security의 "saved
-   request"로 등록해, OTP 이후 리다이렉트가 OAuth 흐름으로 돌아오게 합니다.
-5. `POST portal /api/portal` (`cmd=AuthPortal.twoAuthSend`) — SMS/이메일 코드를
-   발송합니다.
-6. `POST portal /j_spring_security_check.do` — 코드를 검증하면 Spring이
-   `/oauth/authorize` → `/vpn/<client_id>?code=…` 로 리다이렉트합니다.
-7. 그 페이지가 노출하는 `message` 토큰이 Ivanti의 `password#2`가 됩니다.
-8. `POST login.cgi` — username, password, realm, `password#2`를 보내면 `DSID`
-   세션 쿠키를 받습니다.
-9. `sudo openconnect --protocol=nc --cookie-on-stdin kvpn.kaist.ac.kr` — DSID를
-   stdin으로 전달해 프로세스 목록에 노출되지 않게 합니다.
 
 ## 참고 및 문제 해결
 

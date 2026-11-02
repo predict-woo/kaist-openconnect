@@ -141,6 +141,7 @@ get_kvpn_source() {
 }
 
 link_kvpn() {
+    [ -f "$(dirname "$KVPN_SRC")/kvpn_macos.py" ] || die "kvpn_macos.py must be kept next to kvpn. Download the complete repository and try again."
     chmod +x "$KVPN_SRC"
     bin_dir="${KVPN_BIN_DIR:-}"
     if [ -z "$bin_dir" ]; then
