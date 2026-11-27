@@ -31,6 +31,7 @@ import subprocess
 import http.cookiejar
 import urllib.request
 import urllib.parse
+from html.parser import HTMLParser
 
 # ---- deployment constants (from ags_frame.js / captured traffic) ----
 IVANTI = "https://kvpn.kaist.ac.kr"
@@ -96,6 +97,40 @@ class _NoAutoRedirect(urllib.request.HTTPErrorProcessor):
 # --------------------------------------------------------------------------
 # Ivanti side
 # --------------------------------------------------------------------------
+class _SignInNotice(HTMLParser):
+    """Read the gateway's optional pre-authentication notification form."""
+    def __init__(self, body):
+        super().__init__()
+        self.forms = []
+        self.form = None
+        self.in_notice = False
+        self.notice = []
+        self.feed(body)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "form":
+            self.form = {"action": attrs.get("action", ""), "fields": {}}
+        elif tag == "input" and self.form is not None:
+            name = attrs.get("name")
+            if name and (attrs.get("type", "").lower() == "hidden"
+                         or name == "sn-preauth-proceed"):
+                self.form["fields"][name] = attrs.get("value", "")
+        elif tag == "textarea" and attrs.get("name") == "sn-preauth-text":
+            self.in_notice = True
+
+    def handle_endtag(self, tag):
+        if tag == "form" and self.form is not None:
+            self.forms.append(self.form)
+            self.form = None
+        elif tag == "textarea":
+            self.in_notice = False
+
+    def handle_data(self, data):
+        if self.in_notice:
+            self.notice.append(data)
+
+
 class Ivanti:
     def __init__(self):
         self.opener, self.cj = new_session()
@@ -105,6 +140,19 @@ class Ivanti:
     def begin(self):
         """Step 1: land on the sign-in page, capture the login endpoint."""
         url, html = http_get(self.opener, IVANTI + "/")
+        for _ in range(3):
+            page = _SignInNotice(html)
+            form = next((f for f in page.forms
+                         if "sn-preauth-proceed" in f["fields"]), None)
+            if form is None:
+                break
+            action = urllib.parse.urljoin(url, form["action"])
+            if urllib.parse.urlsplit(action).netloc != urllib.parse.urlsplit(IVANTI).netloc:
+                raise KvpnError("Unexpected sign-in notification form destination.")
+            notice = "".join(page.notice).strip()
+            if notice:
+                print("\nVPN gateway notice:\n%s\n" % notice)
+            url, html = http_post(self.opener, action, form["fields"], referer=url)
         self.welcome_url = url
         m = re.search(r'action="([^"]*login\.cgi)"', html)
         if not m:
@@ -399,6 +447,30 @@ def offer_to_save(username, password, realm):
 
 
 # --------------------------------------------------------------------------
+# OTP input
+# --------------------------------------------------------------------------
+def request_otp(portal, username, auto_sms=False):
+    send_type = "sms" if auto_sms else (
+        "sms" if choose("Send code via:", ["SMS", "Email"], 0) == "SMS" else "email")
+    otp = None
+    if auto_sms and sys.platform == "darwin":
+        from kvpn_macos import receive_sms_code
+
+        otp = receive_sms_code(lambda: portal.send_code(username, "sms"))
+    else:
+        if auto_sms:
+            print("Automatic SMS entry requires macOS; enter the code manually.")
+        portal.send_code(username, send_type)
+        print("Code sent via %s. It may take up to a minute to arrive." % send_type.upper())
+
+    if otp is None:
+        otp = input("Enter the code: ").strip()
+    if not otp:
+        raise KvpnError("A code is required.")
+    return otp
+
+
+# --------------------------------------------------------------------------
 # openconnect
 # --------------------------------------------------------------------------
 def launch_tunnel(dsid):
@@ -438,9 +510,11 @@ def choose(prompt, options, default_index=0):
         print("  Please enter a number between 1 and %d." % len(options))
 
 
-USAGE = """usage: kvpn [--forget]
+USAGE = """usage: kvpn [--auto-sms | --no-auto-sms | --forget]
 
-  (no options)  connect to the KAIST VPN
+  (no options)  connect (automatic SMS entry on macOS; manual elsewhere)
+  --auto-sms    send SMS and read its code from macOS Messages
+  --no-auto-sms choose SMS/email and enter the code manually
   --forget      remove stored credentials (Keychain entry + config file)
   -h, --help    show this help
 """
@@ -450,12 +524,17 @@ def main(argv):
     if "-h" in argv or "--help" in argv:
         print(USAGE, end="")
         return
+    if argv not in ([], ["--auto-sms"], ["--no-auto-sms"], ["--forget"], ["forget"]):
+        raise KvpnError("Unknown or conflicting options: %s\n%s" % (" ".join(argv), USAGE))
     if "--forget" in argv or "forget" in argv:
         if not forget_credentials():
             print("No stored credentials found.")
         return
-    if argv:
-        raise KvpnError("Unknown option: %s\n%s" % (" ".join(argv), USAGE))
+    auto_sms = sys.platform == "darwin"
+    if argv == ["--auto-sms"]:
+        auto_sms = True
+    elif argv == ["--no-auto-sms"]:
+        auto_sms = False
 
     print("=== KAIST VPN (kvpn) ===")
     stored = load_credentials()
@@ -480,13 +559,7 @@ def main(argv):
     portal = Portal(welcome)
     portal.begin(username)
 
-    send_type = "sms" if choose("Send code via:", ["SMS", "Email"], 0) == "SMS" else "email"
-    portal.send_code(username, send_type)
-    print("Code sent via %s. It may take up to a minute to arrive." % send_type.upper())
-
-    otp = input("Enter the code: ").strip()
-    if not otp:
-        raise KvpnError("A code is required.")
+    otp = request_otp(portal, username, auto_sms=auto_sms)
 
     password2 = portal.verify(username, otp)
     try:
